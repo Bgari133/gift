@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0A0F0D">
+<title>Зелёный букет из 0 и 1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Marck+Script&display=swap">
+<style>
+/* Одна сцена во весь экран: ночное небо, ASCII-холст и подпись под букетом */
+:root {
+  --bg: #0A0F0D;
+  --ink: #e6efd8;
+  --muted: #7d8a72;
+  --line: #2a3324;
+  --msg: #f1dca8;
+  --font-script: "Marck Script", "Segoe Script", cursive;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); overflow: hidden; font-family: var(--font-mono); }
+canvas {
+  position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none;
+}
+.msg {
+  position: fixed; left: 0; right: 0;
+  bottom: calc(3vh + env(safe-area-inset-bottom, 0px));
+  padding-inline: 16px; text-align: center; pointer-events: none;
+  font-family: var(--font-script); color: var(--msg);
+  font-size: clamp(26px, 4.2vw, 48px); line-height: 1.15;
+  text-shadow: 0 0 14px var(--bg), 0 0 28px var(--bg);
+}
+.msg span { display: block; min-height: 1.15em; }
+.hint {
+  position: fixed; left: 0; right: 0;
+  bottom: calc(5vh + env(safe-area-inset-bottom, 0px));
+  text-align: center; pointer-events: none;
+  font-size: 13px; letter-spacing: 0.14em; text-transform: lowercase; color: var(--muted);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+@keyframes pulse { 50% { opacity: 0.35; } }
+.again {
+  position: fixed;
+  top: calc(16px + env(safe-area-inset-top, 0px));
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  font: 500 12px/1 var(--font-mono); letter-spacing: 0.08em;
+  color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 3px;
+  padding: 9px 12px; cursor: pointer;
+}
+.again:hover { border-color: var(--muted); }
+.again:focus-visible, canvas:focus-visible { outline: 1px solid var(--msg); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .hint { animation: none; } }
+</style>
+</head>
+<body>
+<canvas id="scene" tabindex="0" aria-label="ASCII-анимация: подарочная коробка открывается, внутри букет из пионов и эустом"></canvas>
+<div class="msg" id="msg" aria-live="polite"><span></span><span></span></div>
+<div class="hint" id="hint">нажми, чтобы открыть подарок</div>
+<button class="again" id="again" type="button" hidden>↻ ещё раз</button>
+
+<script>
+// ======================= НАСТРОЙКИ =======================
+const MESSAGE = ["Это тебе ♥", "С любовью"];
+const COL = {
+  // Палитра. Тень любого цвета = 56% от него, поэтому тень #00FF66 — это ровно #008F39.
+  peonyLit:  [0, 255, 102],    // #00FF66 — плотные объёмные лепестки пиона
+  peonyDeep: [0, 143, 57],     // #008F39 — объём и сложная форма пиона
+  eust:      [127, 255, 212],  // #7FFFD4 — эустомы
+  leaf:      [0, 92, 41],      // #005C29 — стебли и листья
+  leafEust:  [0, 92, 41],
+  stem:      [0, 92, 41],
+  box:       [126, 32, 70],
+  ribbon:    [240, 198, 112],
+  wrap:      [232, 182, 188],
+  wrapBand:  [248, 238, 216],
+  gyps:      [250, 250, 255],
+};
+// Три оттенка пионов вокруг #00FF66: светлая мятная сердцевина, лаймовый и нефритовый.
+// core — центр «шапки», lit — лепесток на свету, deep — основание и объём.
+const PEONY_PALS = [
+  { core: [214, 255, 226], lit: [0, 255, 102],  deep: [0, 143, 57] },   // #D6FFE2 → #00FF66 → #008F39
+  { core: [214, 255, 120], lit: [140, 240, 60], deep: [52, 128, 30] },  // #D6FF78 → #8CF03C → #34801E
+  { core: [170, 255, 214], lit: [0, 230, 150],  deep: [0, 122, 86] },   // #AAFFD6 → #00E696 → #007A56
+];
+// Эустомы: аквамарин #7FFFD4 с каймой по краю лепестка (как у настоящих «пикоти»).
+const EUST_PALS = [
+  { base: [127, 255, 212], edge: [184, 166, 255] },  // #7FFFD4 с лиловой каймой #B8A6FF
+  { base: [222, 255, 242], edge: [127, 255, 212] },  // жемчужная #DEFFF2 с аквамариновой каймой
+  { base: [127, 255, 212], edge: [255, 196, 222] },  // #7FFFD4 с нежно-розовой каймой #FFC4DE
+];
+const RAMP = "01";             // весь рисунок — только из нулей и единиц
+const FLIP = 0.6;               // как часто цифры в клетке меняются (раз в секунду)
+// =========================================================
+
+const PI = Math.PI, sin = Math.sin, cos = Math.cos, sqrt = Math.sqrt;
+const smooth = (a, b, x) => { let t = (x - a) / (b - a); t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); };
+
+// детерминированный генератор случайных чисел
+let seed = 7;
+const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+
+// ---------- матрицы (строки: p' = x*row0 + y*row1 + z*row2) ----------
+function basis(ux, uy, uz) {
+  let l = Math.hypot(ux, uy, uz); ux /= l; uy /= l; uz /= l;
+  let rx = 0, ry = 0, rz = 1;
+  if (Math.abs(uz) > 0.9) { rx = 1; rz = 0; }
+  let ax = uy * rz - uz * ry, ay = uz * rx - ux * rz, az = ux * ry - uy * rx;
+  l = Math.hypot(ax, ay, az); ax /= l; ay /= l; az /= l;
+  const bx = ay * uz - az * uy, by = az * ux - ax * uz, bz = ax * uy - ay * ux;
+  return [ax, ay, az, ux, uy, uz, bx, by, bz];
+}
+const rotX = a => { const c = cos(a), s = sin(a); return [1, 0, 0, 0, c, s, 0, -s, c]; };
+const rotY = a => { const c = cos(a), s = sin(a); return [c, 0, -s, 0, 1, 0, s, 0, c]; };
+function matmul(A, B) {
+  const R = new Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++)
+    R[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
+  return R;
+}
+const IDENT = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+const frame = (M, s, ox, oy, oz) => ({ M, s, ox, oy, oz });
+
+// ---------- буферы экрана ----------
+const canvas = document.getElementById("scene");
+const ctx = canvas.getContext("2d");
+let cols, rows, cellW, cellH, dpr, depth, cR, cG, cB, cL, stars;
+const ASP = 0.55;
+
+let pw, ph, img, pix, masks = [], seedA, seedB;
+const BGR = 10, BGG = 15, BGB = 13, BG32 = 0xff000000 | (BGB << 16) | (BGG << 8) | BGR;
+const GLYPHS = RAMP;
+function buildMasks() {
+  const c = document.createElement("canvas"); c.width = pw; c.height = ph;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.font = `${(ph * 0.88).toFixed(1)}px "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace`;
+  g.textBaseline = "top"; g.textAlign = "center"; g.fillStyle = "#fff";
+  masks = [];
+  for (const ch of GLYPHS) {
+    g.clearRect(0, 0, pw, ph);
+    g.fillText(ch, pw / 2, ph * 0.06);
+    const d = g.getImageData(0, 0, pw, ph).data, o = [], a = [];
+    for (let y = 0; y < ph; y++) for (let x = 0; x < pw; x++) {
+      const al = d[(y * pw + x) * 4 + 3];
+      if (al > 8) { o.push(y * canvas.width + x); a.push(al / 255); }
+    }
+    masks.push({ o: Int32Array.from(o), a: Float32Array.from(a) });
+  }
+}
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // окно может быть нулевого размера (скрытая вкладка) — не падаем
+  const w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
+  // целочисленный размер клетки в пикселях устройства; сетка покрывает весь экран
+  const target = Math.max(72, Math.min(260, Math.round(w / 5.2)));
+  pw = Math.max(2, Math.round(w / target * dpr)); ph = Math.max(4, Math.round(pw / ASP));
+  cols = Math.ceil(w * dpr / pw); rows = Math.ceil(h * dpr / ph);
+  cellW = pw / dpr; cellH = ph / dpr;
+  canvas.width = cols * pw; canvas.height = rows * ph;
+  canvas.style.width = (cols * pw / dpr) + "px"; canvas.style.height = (rows * ph / dpr) + "px";
+  img = ctx.createImageData(canvas.width, canvas.height);
+  pix = new Uint32Array(img.data.buffer);
+  buildMasks();
+  const n = cols * rows;
+  seedA = new Uint8Array(n); seedB = new Float32Array(n);
+  for (let i = 0; i < n; i++) { seedA[i] = rnd() < 0.5 ? 0 : 1; seedB[i] = rnd() * 10; }
+  depth = new Float32Array(n); cR = new Uint8Array(n); cG = new Uint8Array(n); cB = new Uint8Array(n); cL = new Float32Array(n);
+  stars = [];
+  const ns = Math.round(n * 0.012);
+  for (let i = 0; i < ns; i++) stars.push([(rnd() * n) | 0, rnd() * 6.28, 0.8 + rnd() * 2.2]);
+}
+
+// ---------- камера и запись точки ----------
+let SH = 0.56; // доля яркости в тени
+let C = IDENT, K = 30, camY = 0, halfW = 0, midY = 0;
+const D = 7;
+const LX = -0.33, LY = 0.6, LZ = -0.73;
+let HX = LX, HY = LY, HZ = LZ - 1;
+{ const l = Math.hypot(HX, HY, HZ); HX /= l; HY /= l; HZ /= l; }
+
+function emit(x, y, z, nx, ny, nz, r, g, b) {
+  const X = x * C[0] + y * C[3] + z * C[6];
+  const Y = x * C[1] + y * C[4] + z * C[7];
+  const Z = x * C[2] + y * C[5] + z * C[8];
+  const sc = D / (D + Z);
+  const fx = halfW + X * K * sc, fy = midY - (Y - camY) * K * ASP * sc;
+  if (fx < 0 || fy < 0 || fx >= cols || fy >= rows) return;
+  const id = (fy | 0) * cols + (fx | 0);
+  if (Z >= depth[id]) return;
+  depth[id] = Z;
+  let NX = nx * C[0] + ny * C[3] + nz * C[6];
+  let NY = nx * C[1] + ny * C[4] + nz * C[7];
+  let NZ = nx * C[2] + ny * C[5] + nz * C[8];
+  if (NZ > 0) { NX = -NX; NY = -NY; NZ = -NZ; }
+  let diff = NX * LX + NY * LY + NZ * LZ; if (diff < 0) diff = 0;
+  let sp = NX * HX + NY * HY + NZ * HZ; sp = sp > 0 ? Math.pow(sp, 22) : 0;
+  const lum = 0.3 + 0.7 * diff;
+  // цвет остаётся в палитре: от тени (SH от цвета) до самого цвета на свету; блик — только в плотности символа
+  // мягкий свет: даже боковые грани получают половину яркости, тень — только у отвёрнутых
+  const dl = NX * LX + NY * LY + NZ * LZ;
+  const tc = Math.min(1, Math.max(0, dl * 0.65 + 0.5));
+  const m = SH + (1 - SH) * tc;
+  cR[id] = r * m; cG[id] = g * m; cB[id] = b * m;
+  cL[id] = Math.min(1, lum + sp * 0.4);
+}
+
+function emitF(F, px, py, pz, nx, ny, nz, r, g, b) {
+  const M = F.M, s = F.s;
+  emit(F.ox + s * (px * M[0] + py * M[3] + pz * M[6]),
+       F.oy + s * (px * M[1] + py * M[4] + pz * M[7]),
+       F.oz + s * (px * M[2] + py * M[5] + pz * M[8]),
+       nx * M[0] + ny * M[3] + nz * M[6],
+       nx * M[1] + ny * M[4] + nz * M[7],
+       nx * M[2] + ny * M[5] + nz * M[8], r, g, b);
+}
+
+// параметрическая поверхность: fn(u, v, out) — позиция, cf(u, v, out) — цвет
+// плотность точек зависит от размера на экране: на телефоне меньше точек — быстрее
+const G = new Float32Array(128 * 128 * 3), tmp = [0, 0, 0], col = [0, 0, 0];
+function surface(nu, nv, fn, cf, F) {
+  const q = Math.min(0.95, Math.max(0.3, K * F.s / 58));
+  nu = Math.max(4, Math.round(nu * q)); nv = Math.max(4, Math.round(nv * q));
+  for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
+    fn(i / (nu - 1), -1 + 2 * j / (nv - 1), tmp);
+    const o = (i * nv + j) * 3; G[o] = tmp[0]; G[o + 1] = tmp[1]; G[o + 2] = tmp[2];
+  }
+  for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
+    const i0 = (i > 0 ? i - 1 : i) * nv, i1 = (i < nu - 1 ? i + 1 : i) * nv;
+    const j0 = j > 0 ? j - 1 : j, j1 = j < nv - 1 ? j + 1 : j;
+    const a = (i1 + j) * 3, b = (i0 + j) * 3, c = (i * nv + j1) * 3, d = (i * nv + j0) * 3;
+    const ux = G[a] - G[b], uy = G[a + 1] - G[b + 1], uz = G[a + 2] - G[b + 2];
+    const vx = G[c] - G[d], vy = G[c + 1] - G[d + 1], vz = G[c + 2] - G[d + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    cf(i / (nu - 1), -1 + 2 * j / (nv - 1), col);
+    const o = (i * nv + j) * 3;
+    emitF(F, G[o], G[o + 1], G[o + 2], nx, ny, nz, col[0], col[1], col[2]);
+  }
+}
+
+const mix = (A, B, t, out, k = 1) => { out[0] = (A[0] + (B[0] - A[0]) * t) * k; out[1] = (A[1] + (B[1] - A[1]) * t) * k; out[2] = (A[2] + (B[2] - A[2]) * t) * k; };
+const solid = c => (u, v, o) => { o[0] = c[0]; o[1] = c[1]; o[2] = c[2]; };
+
+// ---------- лепесток ----------
+// phi — угол, L — длина, half — полуширина (рад), theta — раскрытие, curl — отгиб кончика,
+// bulge — выпуклость, twist — закрутка спиралью, ruf — волнистость края
+function petal(P) {
+  return (u, v, o) => {
+    const uu = u * (1 - 0.3 * v * v);
+    const ang = P.phi + v * P.half * (0.4 + 0.6 * uu) + P.twist * uu;
+    const th = P.theta + P.curl * uu * uu;
+    let r = P.r0 + P.bulge * sin(PI * uu) + P.L * uu * sin(th) + P.roll * v * v * uu;
+    let y = P.y0 + P.L * uu * cos(th);
+    const w = P.ruf * sin(v * P.rf + P.phi * 3.1) * uu * uu * (0.4 + 0.6 * v * v);
+    r += w * cos(th); y -= w * sin(th);
+    o[0] = r * cos(ang); o[1] = y; o[2] = r * sin(ang);
+  };
+}
+const P0 = { phi: 0, L: 0.3, half: 0.6, r0: 0.02, theta: 0, curl: 0, bulge: 0, roll: 0, y0: 0, twist: 0, ruf: 0, rf: 10 };
+const mkP = o => Object.assign({}, P0, o);
+
+// у стеблей и листьев тень мягче (80%), чтобы тёмный #005C29 не терялся на фоне и силуэт читался
+const SH_GREEN = 0.8;
+function sepals(F, n, bloom, spin, len) {
+  const s0 = SH; SH = SH_GREEN;
+  for (let i = 0; i < n; i++)
+    surface(8, 6, petal(mkP({ phi: i * 2 * PI / n + spin, L: len, half: 0.22, r0: 0.03, theta: 0.7 + 1.0 * bloom, curl: 0.3 })),
+      solid(COL.stem), F);
+  SH = s0;
+}
+
+// ---------- ПИОН ----------
+function peony(F, bloom, spin, pal) {
+  // внешние широкие лепестки-чашечка
+  const no = 9;
+  for (let i = 0; i < no; i++) {
+    const f = i / (no - 1);
+    const P = mkP({
+      phi: i * 2.39996 + spin, L: 0.40 + 0.06 * f, half: 0.62, r0: 0.05,
+      theta: 0.06 + bloom * (0.55 + 0.3 * f), curl: bloom * 0.35, bulge: 0.08 + 0.12 * (1 - bloom),
+      roll: 0.04 * bloom, ruf: 0.022, rf: 9,
+    });
+    surface(18, 22, petal(P), (u, v, o) => mix(pal.deep, pal.lit, Math.min(1, u * 1.4), o), F);
+  }
+  // много мелких гофрированных лепестков — «шапка»
+  if (bloom > 0.05) {
+    const ni = Math.max(28, Math.round(56 * Math.min(1, F.s / 0.6))); // у маленьких пионов меньше лепестков — быстрее
+    for (let j = 0; j < ni; j++) {
+      const f = j / (ni - 1);           // 0 — центр, 1 — край
+      const open = bloom;
+      const P = mkP({
+        phi: j * 2.39996 + spin * 1.7, L: (0.12 + 0.16 * f) * (0.5 + 0.5 * open), half: 0.5 + 0.25 * f,
+        r0: (0.02 + 0.2 * sqrt(f)) * (0.45 + 0.55 * open), y0: 0.06 + 0.2 * (1 - f * f) * open,
+        theta: 0.05 + f * 0.6 * open, curl: -1.1 * open * (1 - 0.5 * f), bulge: 0.02,
+        ruf: 0.022, rf: 11 + (j % 4),
+      });
+      // сердцевина светлее, к краю «шапки» — основной цвет, каждый третий лепесток глубже
+      surface(9, 12, petal(P), (u, v, o) => {
+        mix(pal.core, pal.lit, Math.min(1, f * 1.1 + 0.15 * (1 - u)), o);
+        if (j % 3 === 0) mix(o, pal.deep, 0.45, o);
+      }, F);
+    }
+  }
+  sepals(F, 5, bloom, spin, 0.17);
+}
+
+// ---------- ЭУСТОМА ----------
+// кайма: к краю и кончику лепестка цвет плавно переходит в edge
+const picotee = pal => (u, v, o) => {
+  const e = Math.max(Math.min(1, Math.max(0, (u - 0.62) / 0.3)), Math.min(1, Math.max(0, (Math.abs(v) - 0.7) / 0.25)) * u);
+  mix(pal.base, pal.edge, e * 0.85, o);
+};
+function eustoma(F, bloom, spin, pal) {
+  for (let l = 0; l < 2; l++) for (let i = 0; i < 5; i++) {
+    const P = mkP({
+      phi: i * 2 * PI / 5 + l * PI / 5 + spin, L: 0.29 + 0.05 * l, half: 0.72, r0: 0.018,
+      theta: 0.03 + bloom * (0.28 + 0.14 * l), curl: bloom * (0.5 + 0.25 * l),
+      bulge: 0.03 + 0.04 * (1 - bloom), twist: 0.25 + 0.95 * (1 - bloom), roll: 0.035 * bloom,
+      ruf: 0.014 * bloom, rf: 15, y0: 0.01 * (1 - l),
+    });
+    surface(16, 18, petal(P), picotee(pal), F);
+  }
+  if (bloom > 0.3) { // пестик и тычинки
+    const pl = PEONY_PALS[1].core; // светло-лаймовые тычинки
+    for (let i = 0; i < 14; i++) { const y = i / 13 * 0.13; emitF(F, 0, y, 0, 0.3, 0.2, -1, pl[0], pl[1], pl[2]); }
+    for (let i = 0; i < 5; i++) { const a = i * 1.2566 + spin; emitF(F, 0.03 * cos(a), 0.1, 0.03 * sin(a), cos(a), 0.4, sin(a), pl[0], pl[1], pl[2]); }
+  }
+  sepals(F, 5, 0.2, spin, 0.08);
+}
+
+function eustBud(F, spin, pal) {
+  for (let i = 0; i < 5; i++)
+    surface(12, 10, petal(mkP({ phi: i * 2 * PI / 5 + spin, L: 0.3, half: 0.55, r0: 0.012, theta: 0.0, bulge: 0.045, twist: 1.3 })),
+      picotee(pal), F);
+  sepals(F, 5, 0.1, spin, 0.07);
+}
+
+// ---------- стебель / лист ----------
+function bez(p0, p1, p2, t, o) {
+  const a = (1 - t) * (1 - t), b = 2 * t * (1 - t), c = t * t;
+  o[0] = a * p0[0] + b * p1[0] + c * p2[0]; o[1] = a * p0[1] + b * p1[1] + c * p2[1]; o[2] = a * p0[2] + b * p1[2] + c * p2[2];
+}
+function bezT(p0, p1, p2, t) {
+  const x = 2 * (1 - t) * (p1[0] - p0[0]) + 2 * t * (p2[0] - p1[0]);
+  const y = 2 * (1 - t) * (p1[1] - p0[1]) + 2 * t * (p2[1] - p1[1]);
+  const z = 2 * (1 - t) * (p1[2] - p0[2]) + 2 * t * (p2[2] - p1[2]);
+  const l = Math.hypot(x, y, z); return [x / l, y / l, z / l];
+}
+function tube(p0, p1, p2, g, radius, c) {
+  const n = Math.max(8, Math.round(140 * g * Math.min(1, K / 70))), p = [0, 0, 0];
+  const s0 = SH; SH = SH_GREEN;
+  for (let i = 0; i <= n; i++) {
+    const t = g * i / n; bez(p0, p1, p2, t, p);
+    const T = bezT(p0, p1, p2, t), B = basis(T[0], T[1], T[2]);
+    for (let k = 0; k < 10; k++) {
+      const a = k / 10 * 2 * PI, ca = cos(a), sa = sin(a);
+      const nx = ca * B[0] + sa * B[6], ny = ca * B[1] + sa * B[7], nz = ca * B[2] + sa * B[8];
+      emit(p[0] + nx * radius, p[1] + ny * radius, p[2] + nz * radius, nx, ny, nz, c[0], c[1], c[2]);
+    }
+  }
+  SH = s0;
+}
+function leaf(base, d, unfold, length, width, c) {
+  if (unfold <= 0.01) return;
+  // d — направление листа, s — поперёк, nrm — нормаль
+  let sx = -d[2], sz = d[0]; const sl = Math.hypot(sx, sz) || 1; sx /= sl; sz /= sl;
+  const nx = d[1] * sz, ny = d[2] * sx - d[0] * sz, nz = -d[1] * sx;
+  const L = length * (0.3 + 0.7 * unfold), W = width * (0.4 + 0.6 * unfold);
+  const fold = (1 - unfold) * 1.3 + 0.22, cf = cos(fold), sf = sin(fold);
+  const s0 = SH; SH = SH_GREEN;
+  surface(14, 9, (u, v, o) => {
+    const w = W * Math.pow(sin(PI * u), 0.8);
+    o[0] = base[0] + d[0] * u * L + sx * v * w * cf + nx * Math.abs(v) * w * sf;
+    o[1] = base[1] + d[1] * u * L + ny * Math.abs(v) * w * sf - 0.35 * u * u * L;
+    o[2] = base[2] + d[2] * u * L + sz * v * w * cf + nz * Math.abs(v) * w * sf;
+  }, (u, v, o) => mix(c, c, 0, o, 0.9 + 0.1 * (1 - Math.abs(v))), frame(IDENT, 1, 0, 0, 0));
+  SH = s0;
+}
+
+// ---------- букет ----------
+const HS = 0.7; // общий масштаб цветков
+// 24 цветка: пион в центре, кольцо из 5 пионов, кольцо из 10 эустом
+// и 8 цветков поменьше по краю корзины — они свешиваются через край (пионы и эустомы через один)
+const STEMS = [{ type: "peony", head: [0, 0.72, 0], size: 1.0 }];
+for (let k = 0; k < 5; k++)
+  STEMS.push({ type: "peony", ang: 0.3 + k * 2 * PI / 5, r: 0.48, y: 0.52 + 0.06 * (k % 2), size: 0.9 });
+for (let k = 0; k < 10; k++)
+  STEMS.push({ type: "eust", ang: 0.3 + PI / 10 + k * PI / 5, r: 0.86, y: 0.32 + 0.07 * (k % 3), size: 0.85 });
+for (let k = 0; k < 8; k++)
+  STEMS.push({ type: k % 2 ? "eust" : "peony", ang: 0.3 + PI / 8 + k * PI / 4 + 0.12, r: 1.04, y: 0.16 + 0.05 * (k % 3),
+    size: k % 2 ? 0.72 : 0.62 });
+let pc = 0, ec = 0;
+STEMS.forEach((s, i) => {
+  if (!s.head) s.head = [s.r * cos(s.ang), s.y, s.r * sin(s.ang)];
+  s.spin = i * 1.7 + 0.4;
+  // оттенки чередуются: центральный пион мятный, вокруг — лаймовый и нефритовый, эустомы с разной каймой
+  s.pal = s.type === "peony" ? PEONY_PALS[pc === 0 ? 0 : 1 + (pc - 1) % 2] : EUST_PALS[ec % 3];
+  if (s.type === "peony") pc++; else ec++;
+  s.p0 = [0.05 * s.head[0], -1.0, 0.05 * s.head[2]];
+  s.p1 = [0.1 * s.head[0], -0.3, 0.1 * s.head[2]];
+  const ox = s.head[0] + 0.3 * cos(i * 2.1), oz = s.head[2] + 0.3 * sin(i * 2.1), ol = Math.hypot(ox, oz);
+  s.out = [ox / ol, 0, oz / ol];
+});
+const GYPSO = [];
+for (let i = 0; i < 40; i++) {
+  const a = rnd() * 2 * PI, r = 0.45 + rnd() * 0.58;
+  const c = [r * cos(a), 0.62 - 0.35 * r + rnd() * 0.25, r * sin(a)], pts = [];
+  for (let k = 0; k < 18; k++) {
+    let x = rnd() - 0.5, y = rnd() - 0.5, z = rnd() - 0.5; const l = Math.hypot(x, y, z) || 1; const rr = 0.01 + rnd() * 0.035;
+    pts.push([x / l, y / l, z / l, rr]);
+  }
+  GYPSO.push({ c, pts, thr: rnd() });
+}
+
+// ---------- плетёная корзина ----------
+const BASKET = {
+  bottom: -1.36, top: 0.05,       // высота корзины
+  rows: 14, stakes: 28,           // рядов плетения и вертикальных прутьев
+  light: [214, 166, 100],         // прут сверху (лицевой)
+  dark: [146, 98, 52],            // прут снизу (уходит под соседний)
+  gap: [80, 52, 28],              // щели между рядами
+  ribbon: [184, 166, 255],        // лиловая лента — в тон каймы эустом
+};
+const frac = x => x - Math.floor(x);
+const basketR = u => 0.56 + 0.4 * Math.pow(u, 0.8) + 0.05 * sin(PI * u);
+
+function basket(t) {
+  const B = BASKET, H = B.top - B.bottom, ID = frame(IDENT, 1, 0, 0, 0);
+  // стенки: прутья идут «над-под» в шахматном порядке, поэтому плетение объёмное
+  const weave = (u, a) => {
+    const ru = u * B.rows, row = Math.floor(ru), fr = frac(ru);
+    const stake = Math.floor(a / (2 * PI) * B.stakes);
+    const over = (stake + row) % 2 === 0;
+    return { fr, over, bump: sin(PI * fr) * (over ? 1 : 0.45) };
+  };
+  surface(84, 120, (u, v, o) => {
+    const a = (v + 1) * PI, w = weave(u, a);
+    const r = basketR(u) + 0.024 * w.bump;
+    o[0] = r * cos(a); o[1] = B.bottom + H * u; o[2] = r * sin(a);
+  }, (u, v, o) => {
+    const w = weave(u, (v + 1) * PI);
+    const edge = Math.min(w.fr, 1 - w.fr) < 0.12;
+    const c = edge ? B.gap : w.over ? B.light : B.dark;
+    o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+  }, ID);
+
+  // мох сверху: из него выходят стебли
+  const s0 = SH; SH = SH_GREEN;
+  surface(26, 60, (u, v, o) => {
+    const r = u * (basketR(1) - 0.03), a = (v + 1) * PI, x = r * cos(a), z = r * sin(a);
+    o[0] = x; o[1] = B.top - 0.02 + 0.06 * (1 - u * u) + 0.015 * sin(23 * x) * sin(19 * z); o[2] = z;
+  }, (u, v, o) => { const c = (sin(40 * u) * sin(9 * v) > 0.3) ? COL.peonyDeep : COL.leaf; o[0] = c[0]; o[1] = c[1]; o[2] = c[2]; }, ID);
+  SH = s0;
+
+  // косичка по краю
+  const RR = basketR(1) + 0.01, rimY = B.top + 0.02;
+  surface(12, 160, (u, v, o) => {
+    const tv = u * 2 * PI, a = (v + 1) * PI;
+    const rt = 0.055 * (1 + 0.18 * sin(3 * tv + 42 * a));
+    o[0] = (RR + rt * cos(tv)) * cos(a); o[1] = rimY + rt * sin(tv); o[2] = (RR + rt * cos(tv)) * sin(a);
+  }, (u, v, o) => {
+    const c = sin(3 * u * 2 * PI + 42 * (v + 1) * PI) > 0 ? B.light : B.dark;
+    o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+  }, ID);
+
+  // ручка: сначала лежит, после открытия коробки поднимается; обвита лентой
+  const up = smooth(4.6, 6.0, t);
+  const HF = frame(rotX(-(1 - up) * 1.45), 1, 0, rimY, 0);
+  const AX = RR, AY = 1.12;
+  surface(70, 10, (u, v, o) => {
+    const s = u * PI, tv = v * PI;
+    let tx = -AX * sin(s), ty = AY * cos(s); const tl = Math.hypot(tx, ty); tx /= tl; ty /= tl;
+    const n2x = ty, n2y = -tx;                      // нормаль в плоскости арки; вторая — ось z
+    const rt = 0.042 * (1 + 0.15 * sin(3 * tv + 60 * u));
+    o[0] = AX * cos(s) + rt * cos(tv) * n2x; o[1] = AY * sin(s) + rt * cos(tv) * n2y; o[2] = rt * sin(tv);
+  }, (u, v, o) => {
+    const c = frac(u * 11 + v * 0.5) < 0.28 ? B.ribbon : sin(3 * v * PI + 60 * u) > 0 ? B.light : B.dark;
+    o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+  }, HF);
+
+  // бант спереди
+  const K = [0, rimY + 0.01, RR + 0.06];
+  const Q = [0, 0.82, 0.57], Wd = [0, -0.57, 0.82];
+  for (const sx of [-1, 1]) {
+    surface(36, 7, (u, v, o) => {
+      const tt = u * 2 * PI, a = 0.2 * (1 - cos(tt)), b = 0.12 * sin(tt);
+      o[0] = K[0] + sx * a; o[1] = K[1] + Q[1] * b + Wd[1] * 0.05 * v; o[2] = K[2] + Q[2] * b + Wd[2] * 0.05 * v + 0.04 * sin(PI * u);
+    }, solid(B.ribbon), ID);
+    surface(16, 6, (u, v, o) => {
+      o[0] = K[0] + sx * (0.04 + 0.12 * u) + 0.045 * v; o[1] = K[1] - 0.42 * u; o[2] = K[2] + 0.05 * u + 0.02 * sin(5 * u);
+    }, (u, v, o) => mix(B.ribbon, B.ribbon, 0, o, 0.85), ID);
+  }
+  surface(10, 12, (u, v, o) => { const th = u * PI, ph = v * PI; o[0] = K[0] + 0.05 * sin(th) * cos(ph); o[1] = K[1] + 0.05 * cos(th); o[2] = K[2] + 0.05 * sin(th) * sin(ph); },
+    solid(B.ribbon), ID);
+}
+
+function bouquet(t) {
+  basket(t);
+
+  const p = [0, 0, 0];
+  STEMS.forEach((s, i) => {
+    const g = smooth(4.3 + 0.1 * i, 6.8 + 0.1 * i, t);
+    if (g <= 0) return;
+    tube(s.p0, s.p1, s.head, g, 0.021, COL.stem);
+    bez(s.p0, s.p1, s.head, g, p);
+    const T = bezT(s.p0, s.p1, s.head, g);
+    const unf = smooth(5.5 + 0.1 * i, 8.0 + 0.1 * i, t);
+    const lc = s.type === "eust" ? COL.leafEust : COL.leaf;
+    [[0.8, -0.9], [0.9, 0.9]].forEach(([tl, turn]) => {
+      if (g <= tl) return;
+      const bp = [0, 0, 0]; bez(s.p0, s.p1, s.head, tl, bp);
+      const R = rotY(turn), o = s.out;
+      let dx = (o[0] * R[0] + o[2] * R[6]) * 0.8, dz = (o[0] * R[2] + o[2] * R[8]) * 0.8, dy = 0.6;
+      const l = Math.hypot(dx, dy, dz);
+      leaf(bp, [dx / l, dy / l, dz / l], unf, s.type === "eust" ? 0.2 : 0.27, s.type === "eust" ? 0.075 : 0.07, lc);
+    });
+    const bloom = smooth(7.0 + 0.12 * i, 10.8 + 0.12 * i, t);
+    const size = HS * s.size * smooth(0.45, 1.0, g);
+    if (size > 0.01) {
+      const F = frame(basis(T[0], T[1], T[2]), size, p[0], p[1], p[2]);
+      if (s.type === "peony") peony(F, bloom, s.spin, s.pal); else eustoma(F, bloom, s.spin, s.pal);
+    }
+    // у эустомы — бутон на боковой веточке
+    if (s.type === "eust" && g > 0.8) {
+      const b0 = [0, 0, 0]; bez(s.p0, s.p1, s.head, 0.8, b0);
+      const tip = [s.head[0] + s.out[0] * 0.2, s.head[1] + 0.06, s.head[2] + s.out[2] * 0.2];
+      const mid = [(b0[0] + tip[0]) / 2 + s.out[0] * 0.05, (b0[1] + tip[1]) / 2, (b0[2] + tip[2]) / 2 + s.out[2] * 0.05];
+      const gb = smooth(0.8, 1.0, g);
+      tube(b0, mid, tip, gb, 0.013, COL.stem);
+      const bp = [0, 0, 0]; bez(b0, mid, tip, gb, bp); const bt = bezT(b0, mid, tip, gb);
+      eustBud(frame(basis(bt[0], bt[1], bt[2]), HS * 0.62 * gb, bp[0], bp[1], bp[2]), s.spin, s.pal);
+    }
+  });
+
+  const gy = smooth(6.5, 9.0, t);
+  for (const q of GYPSO) {
+    if (gy <= q.thr) continue;
+    for (const [x, y, z, r] of q.pts) emit(q.c[0] + x * r, q.c[1] + y * r, q.c[2] + z * r, x, y, z, COL.gyps[0], COL.gyps[1], COL.gyps[2]);
+  }
+}
+
+// ---------- коробка ----------
+const FLOOR = -1.4, WALL_H = 1.65, HALF = 1.0, LID_H = 0.25;
+function boxColor(s, h, o) {
+  if (Math.abs(s) < 0.12) { o[0] = COL.ribbon[0]; o[1] = COL.ribbon[1]; o[2] = COL.ribbon[2]; return; }
+  const k = sin(s * 14) * sin(h * 14) > 0.88 ? 1.45 : 1;
+  o[0] = COL.box[0] * k; o[1] = COL.box[1] * k; o[2] = COL.box[2] * k;
+}
+function box(t, shake) {
+  const fall = smooth(3.6, 4.7, t) * (PI / 2 - 0.03), sf = sin(fall), cf = cos(fall);
+  // раскрытая коробка плавно уезжает вниз — остаётся только корзина с букетом
+  const away = smooth(5.2, 7.4, t) * 3.2;
+  if (away > 3.1) return;
+  const F0 = frame(IDENT, 1, shake, -away, 0);
+  for (let k = 0; k < 4; k++) {
+    const ox = cos(k * PI / 2), oz = sin(k * PI / 2), tx = -oz, tz = ox;
+    surface(60, 84, (u, v, o) => {
+      const h = u * WALL_H;
+      o[0] = ox * HALF + tx * v * HALF + (ox * sf) * h;
+      o[1] = FLOOR + cf * h;
+      o[2] = oz * HALF + tz * v * HALF + (oz * sf) * h;
+    }, (u, v, o) => boxColor(v, u * WALL_H, o), F0);
+  }
+  surface(70, 70, (u, v, o) => { o[0] = (u * 2 - 1) * HALF; o[1] = FLOOR; o[2] = v * HALF; },
+    (u, v, o) => { o[0] = COL.box[0] * 0.7; o[1] = COL.box[1] * 0.7; o[2] = COL.box[2] * 0.7; }, F0);
+
+  const lift = smooth(2.6, 3.9, t);
+  if (lift >= 1) return;
+  const F = frame(rotX(lift * 0.9), 1, shake, FLOOR + WALL_H + lift * 4.5, lift * 1.5);
+  const LH = HALF * 1.06;
+  surface(70, 70, (u, v, o) => { o[0] = (u * 2 - 1) * LH; o[1] = LID_H; o[2] = v * LH; }, (u, v, o) => {
+    const x = u * 2 - 1;
+    if (Math.abs(x) < 0.12 || Math.abs(v) < 0.12) { o[0] = COL.ribbon[0]; o[1] = COL.ribbon[1]; o[2] = COL.ribbon[2]; }
+    else { o[0] = COL.box[0]; o[1] = COL.box[1]; o[2] = COL.box[2]; }
+  }, F);
+  for (let k = 0; k < 4; k++) {
+    const ox = cos(k * PI / 2), oz = sin(k * PI / 2), tx = -oz, tz = ox;
+    surface(9, 84, (u, v, o) => { o[0] = ox * LH + tx * v * LH; o[1] = u * LID_H; o[2] = oz * LH + tz * v * LH; },
+      (u, v, o) => boxColor(v, u * LID_H, o), F);
+  }
+  // бант
+  const ky = LID_H + 0.1;
+  const Q = [0, 0.75, 0.66], W = [0, -0.66, 0.75];
+  for (const sx of [-1, 1]) {
+    surface(40, 7, (u, v, o) => {
+      const tt = u * 2 * PI, a = 0.17 * (1 - cos(tt)), b = 0.11 * sin(tt);
+      o[0] = sx * a; o[1] = ky + Q[1] * b + W[1] * 0.06 * v; o[2] = Q[2] * b + W[2] * 0.06 * v;
+    }, solid(COL.ribbon), F);
+    surface(12, 6, (u, v, o) => {
+      o[0] = sx * 0.28 * u + 0.05 * v; o[1] = ky + (LID_H + 0.01 - ky) * u; o[2] = 0.35 * u;
+    }, (u, v, o) => mix(COL.ribbon, COL.ribbon, 0, o, 0.9), F);
+  }
+  surface(10, 12, (u, v, o) => { const th = u * PI, ph = v * PI; o[0] = 0.06 * sin(th) * cos(ph); o[1] = ky + 0.06 * cos(th); o[2] = 0.06 * sin(th) * sin(ph); },
+    solid(COL.ribbon), F);
+}
+
+// ---------- кадр ----------
+function render(t, yaw, now) {
+  depth.fill(Infinity);
+  const zoom = smooth(4.5, 10.0, t);
+  C = matmul(rotY(yaw), rotX(-0.35 - 0.15 * zoom));
+  const K0 = Math.min(cols * 0.27, rows * 0.58 / (ASP / 0.5));
+  // финальный план: букет почти во всю ширину (на телефоне в портрете — чуть крупнее)
+  const portrait = rows * cellH > cols * cellW * 1.2;
+  // в кадр помещаются ручка корзины сверху и верхняя половина корзины над подписью
+  const KF = Math.min(K0 * 1.6, cols * (portrait ? 0.45 : 0.38), rows * 0.8 / (1.8 * ASP));
+  K = K0 + (KF - K0) * zoom;
+  halfW = cols / 2; midY = rows * 0.5;
+  // на компьютере верх ручки — у верхнего края; на телефоне вся корзина по центру, над подписью
+  const camF = portrait ? -0.05 - 0.08 * rows / (K * ASP) : 1.32 - (midY - 0.04 * rows) / (K * ASP);
+  camY = -0.3 + (camF + 0.3) * zoom;
+
+  let shake = 0;
+  if (t > 1.2 && t < 2.5) shake = 0.05 * sin(t * 45) * smooth(1.2, 1.5, t) * (1 - smooth(2.2, 2.5, t));
+  box(t, shake);
+  bouquet(t);
+
+  // заделываем дырки между точками
+  const n = cols * rows;
+  for (let y = 0; y < rows; y++) for (let x = 1; x < cols - 1; x++) {
+    const id = y * cols + x;
+    if (depth[id] !== Infinity) continue;
+    const l = id - 1, r = id + 1;
+    if (depth[l] !== Infinity && depth[r] !== Infinity && Math.abs(depth[l] - depth[r]) < 0.12) {
+      depth[id] = depth[l]; cR[id] = cR[l]; cG[id] = cG[l]; cB[id] = cB[l]; cL[id] = (cL[l] + cL[r]) / 2;
+    }
+  }
+  for (let y = 1; y < rows - 1; y++) for (let x = 0; x < cols; x++) {
+    const id = y * cols + x;
+    if (depth[id] !== Infinity) continue;
+    const u = id - cols, d = id + cols;
+    if (depth[u] !== Infinity && depth[d] !== Infinity && Math.abs(depth[u] - depth[d]) < 0.12) {
+      depth[id] = depth[u]; cR[id] = cR[u]; cG[id] = cG[u]; cB[id] = cB[u]; cL[id] = (cL[u] + cL[d]) / 2;
+    }
+  }
+
+  // контуры: клетка перед заметно более далёкой соседней — темнее, так видны края лепестков
+  for (let y = 0; y < rows - 1; y++) for (let x = 0; x < cols - 1; x++) {
+    const id = y * cols + x, z = depth[id];
+    if (z === Infinity) continue;
+    const dr = depth[id + 1], dd = depth[id + cols];
+    if (dr - z > 0.07 || dd - z > 0.07) {
+      cL[id] *= 0.5; cR[id] *= 0.62; cG[id] *= 0.62; cB[id] *= 0.62;
+    }
+  }
+
+  // рисуем: символы копируются в пиксели из готовых масок — намного быстрее fillText
+  pix.fill(BG32);
+  // звёзды
+  for (const [id, ph, sp] of stars) {
+    if (depth[id] !== Infinity) continue;
+    const b = 0.5 + 0.5 * sin(now * sp + ph);
+    if (b < 0.25) continue;
+    const v = 30 + 150 * b;
+    blit(id, bit(id, now), v * 0.75, v * 0.95, v * 0.85);
+  }
+  for (let id = 0; id < n; id++) {
+    if (depth[id] === Infinity) continue;
+    // плотности символа больше нет, поэтому блик — лёгкое осветление, палитра почти не меняется
+    const k = 0.92 + 0.16 * cL[id];
+    blit(id, bit(id, now), Math.min(255, cR[id] * k), Math.min(255, cG[id] * k), Math.min(255, cB[id] * k));
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// у каждой клетки своя цифра, которая время от времени переворачивается 0 ↔ 1
+function bit(id, now) { return (seedA[id] + ((now * FLIP + seedB[id]) | 0)) & 1; }
+
+function blit(id, ci, r, g, b) {
+  const m = masks[ci], o = m.o, a = m.a;
+  const base = ((id / cols) | 0) * ph * canvas.width + (id % cols) * pw;
+  for (let k = 0; k < o.length; k++) {
+    const t = a[k];
+    pix[base + o[k]] = 0xff000000 | ((BGB + (b - BGB) * t) << 16) | ((BGG + (g - BGG) * t) << 8) | (BGR + (r - BGR) * t);
+  }
+}
+
+// ---------- сценарий ----------
+const msgEl = document.getElementById("msg").children;
+const hint = document.getElementById("hint");
+const again = document.getElementById("again");
+const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let opened = null;            // время нажатия
+const START = performance.now();
+
+function open() {
+  if (opened !== null) return;
+  opened = performance.now();
+  hint.hidden = true;
+}
+canvas.addEventListener("click", open);
+canvas.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+again.addEventListener("click", () => {
+  opened = null; hint.hidden = false; again.hidden = true;
+  for (const s of msgEl) s.textContent = "";
+  canvas.focus();
+});
+
+function animTime(now) {
+  if (opened === null) return 0.5;
+  const e = (now - opened) / 1000;
+  return reduce ? 17 : 1.15 + e;
+}
+
+function typeMessage(t) {
+  let shown = Math.max(0, Math.floor((t - 12.2) * 12));
+  MESSAGE.forEach((line, i) => {
+    const part = [...line].slice(0, Math.max(0, shown)).join("");
+    shown -= [...line].length;
+    if (msgEl[i].textContent !== part) msgEl[i].textContent = part;
+  });
+}
+
+function loop(nowMs) {
+  const now = (nowMs - START) / 1000;
+  const t = animTime(nowMs);
+  render(t, (reduce ? 0.08 : 0.32) * now + 0.6, now);
+  typeMessage(t);
+  if (t > 14.5 && again.hidden) again.hidden = false;
+  requestAnimationFrame(loop);
+}
+
+resize();
+window.addEventListener("resize", resize);
+if (document.fonts) document.fonts.ready.then(buildMasks); // когда шрифт догрузится — перестроить символы
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
